@@ -12,11 +12,107 @@
 
 ```
 pip install django djangorestframework
+createdb example_search
+```
+
+**example/models.py**
+
+```python
+from django.db import models
+
+
+class Course(models.Model):
+    course_code = models.CharField(max_length=16, unique=True)
+    title = models.CharField(max_length=250)
+    description = models.TextField()
+
+    def __str__(self):
+        return f'{self.course_code} {self.title}'
+```
+
+```
+python manage.py makemigrations
+python manage.py migrate
+python manage.py createsuperuser
+```
+
+**example/admin.py**
+
+```python
+from django.contrib import admin
+from .models import Course
+
+
+@admin.register(Course)
+class CourseAdmin(admin.ModelAdmin):
+    fields = ('id', 'course_code', 'title', 'description',)
+    list_display = ('id', 'course_code', 'title',)
+    readonly_fields = ('id',)
+```
+
+**example/serializers.py**
+
+```python
+from rest_framework import serializers
+from .models import Course
+
+
+class CourseSearchSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Course
+        fields = ('id', 'course_code', 'title',)
+```
+
+**example/views.py**
+
+```python
+from rest_framework.generics import ListAPIView
+from .models import Course
+from .serializers import CourseSearchSerializer
+
+
+class CourseSearchView(ListAPIView):
+    serializer_class = CourseSearchSerializer
+
+    def get_queryset(self):
+        query = self.request.query_params.get('query')
+        if query is None:
+            return Course.objects.none()
+        return Course.objects.all()
+```
+
+```sql
+SELECT *
+  FROM example_course;
 ```
 
 ## Basic Search
 
 (Basic search here.)
+
+**example/views.py**
+
+```python
+from rest_framework.generics import ListAPIView
+from .models import Course
+from .serializers import CourseSearchSerializer
+
+
+class CourseSearchView(ListAPIView):
+    serializer_class = CourseSearchSerializer
+
+    def get_queryset(self):
+        query = self.request.query_params.get('query')
+        if query is None:
+            return Course.objects.none()
+        return Course.objects.filter(title__iexact=query)
+```
+
+```sql
+SELECT *
+  FROM example_course
+ WHERE UPPER(title) = UPPER('biology');
+```
 
 ## Full Text Search
 
@@ -25,6 +121,99 @@ pip install django djangorestframework
 ## Optimization
 
 (Optimization here.)
+
+**example/models.py**
+
+```python
+from django.contrib.postgres.search import SearchVectorField
+from django.db import models
+
+
+class Course(models.Model):
+    course_code = models.CharField(max_length=16, unique=True)
+    title = models.CharField(max_length=250)
+    description = models.TextField()
+    search_vector = SearchVectorField(null=True, blank=True)
+
+    def __str__(self):
+        return f'{self.course_code} {self.title}'
+```
+
+```
+python manage.py makemigrations
+```
+
+**example/migrations/0002_course_search_vector.py**
+
+```python
+from django.contrib.postgres.search import SearchVector, SearchVectorField
+from django.db import migrations
+
+
+def update_search_vector(apps, schema_editor):
+    Course = apps.get_model('example', 'Course')
+    Course.objects.all().update(search_vector=(
+        SearchVector('course_code', weight='A') +
+        SearchVector('title', weight='A') +
+        SearchVector('description', weight='C')
+    ))
+
+
+class Migration(migrations.Migration):
+    dependencies = [
+        ('example', '0001_initial'),
+    ]
+
+    operations = [
+        migrations.AddField(
+            model_name='course',
+            name='search_vector',
+            field=SearchVectorField(blank=True, null=True),
+        ),
+        migrations.RunPython(update_search_vector),
+    ]
+```
+
+```
+python manage.py migrate
+```
+
+**example/signals.py**
+
+```python
+from django.contrib.postgres.search import SearchVector
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+from .models import Course
+
+
+@receiver(post_save, sender=Course)
+def update_search_vector(sender, instance, *args, **kwargs):
+    sender.objects.filter(pk=instance.id).update(search_vector=(
+        SearchVector('course_code', weight='A') +
+        SearchVector('title', weight='A') +
+        SearchVector('description', weight='C')
+    ))
+```
+
+**example/__init__.py**
+
+```python
+default_app_config = 'example.apps.ExampleConfig'
+```
+
+**example/apps.py**
+
+```python
+from django.apps import AppConfig
+
+
+class ExampleConfig(AppConfig):
+    name = 'example'
+
+    def ready(self):
+        import example.signals
+```
 
 ## Ranking
 
