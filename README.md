@@ -11,9 +11,37 @@
 (Project setup here.)
 
 ```
-pip install django djangorestframework
-createdb example_search
+computer$ mkvirtualenv example-search
+(example-search) computer$ pip install django djangorestframework psycopg2
+(example-search) computer$ django-admin startproject example_search
+(example-search) computer$ cd example_search
+(example-search) computer$ python manage.py startapp example
+(example-search) computer$ createuser -d -e -W example_search
+Password: password
+CREATE ROLE example_search NOSUPERUSER CREATEDB NOCREATEROLE INHERIT LOGIN;
+(example-search) computer$ createdb -e -O "example_search" example_search
+CREATE DATABASE example_search OWNER example_search;
+(example-search) computer$ export DB_NAME=example_search
+(example-search) computer$ export DB_USER=example_search
+(example-search) computer$ export DB_PASS=password
 ```
+
+**example_search/settings.py**
+
+```python
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.getenv('DB_NAME'),
+        'USER': os.getenv('DB_USER'),
+        'PASSWORD': os.getenv('DB_PASS'),
+        'HOST': '127.0.0.1',
+        'PORT': '5432',
+    }
+}
+```
+
+Add `rest_framework` and `example` to `INSTALLED_APPS`.
 
 **example/models.py**
 
@@ -31,9 +59,29 @@ class Course(models.Model):
 ```
 
 ```
-python manage.py makemigrations
-python manage.py migrate
-python manage.py createsuperuser
+(example-search) computer$ python manage.py makemigrations
+Migrations for 'example':
+  example/migrations/0001_initial.py
+    - Create model Course
+(example-search) computer$ python manage.py migrate
+(example-search) computer$ python loaddata ./example/fixtures/courses.json
+(example-search) computer$ psql -U example_search
+example_search=# SELECT count(*)
+example_search-#   FROM example_course;
+ count 
+-------
+   522
+(1 row)
+
+example_search=# CREATE EXTENSION pg_trgm;
+example_search=# SELECT show_trgm('hello');
+            show_trgm            
+---------------------------------
+ {"  h"," he",ell,hel,llo,"lo "}
+(1 row)
+
+example_search=# \q
+(example-search) computer$ python manage.py createsuperuser
 ```
 
 **example/admin.py**
@@ -81,9 +129,18 @@ class CourseSearchView(ListAPIView):
         return Course.objects.all()
 ```
 
-```sql
-SELECT *
-  FROM example_course;
+**example_search/urls.py**
+
+```python
+from django.contrib import admin
+from django.urls import path
+from example.views import CourseSearchView
+
+urlpatterns = [
+    path('admin/', admin.site.urls),
+    path('api/course/search/', CourseSearchView.as_view()),
+]
+
 ```
 
 ## Basic Search
@@ -94,6 +151,7 @@ SELECT *
 
 ```python
 from rest_framework.generics import ListAPIView
+from django.db.models import Q
 from .models import Course
 from .serializers import CourseSearchSerializer
 
@@ -105,18 +163,191 @@ class CourseSearchView(ListAPIView):
         query = self.request.query_params.get('query')
         if query is None:
             return Course.objects.none()
-        return Course.objects.filter(title__iexact=query)
+        return Course.objects.filter(
+            Q(course_code=query) | 
+            Q(title=query) | 
+            Q(description=query)
+        )
 ```
 
 ```sql
-SELECT *
+SELECT id, course_code, title
   FROM example_course
- WHERE UPPER(title) = UPPER('biology');
+ WHERE course_code = 'Animal Biology' 
+    OR title = 'Animal Biology' 
+    OR description = 'Animal Biology';
+```
+
+```
+example_search=# SELECT id, course_code, title
+example_search-#   FROM example_course
+example_search-#  WHERE course_code = 'Animal Biology' 
+example_search-#     OR title = 'Animal Biology' 
+example_search-#     OR description = 'Animal Biology';
+ id  | course_code |     title      
+-----+-------------+----------------
+ 459 | BIOL221     | Animal Biology
+(1 row)
 ```
 
 ## Full Text Search
 
 (Full text search here.)
+
+A basic search works fine when your query matches a field's value exactly, but what about when your query matches part of the value? You might point to the `contains` lookup expression. But wouldn't it be nice if when you searched for "biology", your query matched "biological" too?
+
+**example/views.py**
+
+```python
+from rest_framework.generics import ListAPIView
+from django.contrib.postgres.search import SearchQuery, SearchVector
+from .models import Course
+from .serializers import CourseSearchSerializer
+
+
+class CourseSearchView(ListAPIView):
+    serializer_class = CourseSearchSerializer
+
+    def get_queryset(self):
+        query = self.request.query_params.get('query')
+        if query is None:
+            return Course.objects.none()
+        search_vector = (
+            SearchVector('course_code') + 
+            SearchVector('title') + 
+            SearchVector('description')
+        )
+        return Course.objects.annotate(
+            search_vector=search_vector
+        ).filter(search_vector=SearchQuery(query))
+```
+
+```sql
+WITH courses AS (
+  SELECT id, course_code, title, description, 
+         (
+           to_tsvector(course_code) || 
+           to_tsvector(title) || 
+           to_tsvector(description)
+         ) AS search_vector
+    FROM example_course
+)
+SELECT id, course_code, title
+  FROM courses
+ WHERE search_vector @@ plainto_tsquery('biology');
+```
+
+```
+example_search=# WITH courses AS (
+example_search(#   SELECT id, course_code, title, description, 
+example_search(#          (
+example_search(#            to_tsvector(course_code) || 
+example_search(#            to_tsvector(title) || 
+example_search(#            to_tsvector(description)
+example_search(#          ) AS search_vector
+example_search(#     FROM example_course
+example_search(# )
+example_search-# SELECT id, course_code, title
+example_search-#   FROM courses
+example_search-#  WHERE search_vector @@ plainto_tsquery('biology');
+ id  | course_code |             title             
+-----+-------------+-------------------------------
+   1 | BIOL112     | General Biology I
+   2 | BIOL113     | General Biology II
+  61 | PSYC646     | Lifespan Development
+  77 | PSYC232     | Developmental Psychology
+ 323 | ENVR233     | Soil Science
+ 448 | BIOL498     | Cancer Biology
+ 453 | BIOL312     | Cell Biology
+ 454 | BIOL294     | Anatomy and Physiology II Lab
+ 455 | BIOL293     | Anatomy and Physiology I Lab
+ 456 | BIOL224     | Plant Biology Lab
+ 457 | BIOL223     | Animal Biology Lab
+ 458 | BIOL222     | Plant Biology
+ 459 | BIOL221     | Animal Biology
+(13 rows)
+```
+
+## Ranking
+
+(Ranking here.)
+
+**example/views.py**
+
+```python
+from rest_framework.generics import ListAPIView
+from django.contrib.postgres.search import SearchQuery, SearchRank, SearchVector
+from .models import Course
+from .serializers import CourseSearchSerializer
+
+
+class CourseSearchView(ListAPIView):
+    serializer_class = CourseSearchSerializer
+
+    def get_queryset(self):
+        query = self.request.query_params.get('query')
+        if query is None:
+            return Course.objects.none()
+        search_vector = (
+            SearchVector('course_code', weight='B') + 
+            SearchVector('title', weight='A') + 
+            SearchVector('description', weight='C')
+        )
+        search_query = SearchQuery(query)
+        return Course.objects.annotate(
+            rank=SearchRank(search_vector, search_query)
+        ).filter(rank__gte=0.1).order_by('-rank', 'course_code')
+```
+
+```sql
+WITH courses AS (
+  SELECT id, course_code, title, description, ts_rank(
+         (
+           setweight(to_tsvector(course_code), 'B') || 
+           setweight(to_tsvector(title), 'A') || 
+           setweight(to_tsvector(description), 'C')
+         ),
+         plainto_tsquery('biology')) AS rank
+    FROM example_course
+)
+SELECT id, course_code, title, rank
+  FROM courses
+ WHERE rank >= 0.1
+ ORDER BY rank DESC, course_code ASC;
+```
+
+```
+example_search=# WITH courses AS (
+example_search(#   SELECT id, course_code, title, description, ts_rank(
+example_search(#          (
+example_search(#            setweight(to_tsvector(course_code), 'B') || 
+example_search(#            setweight(to_tsvector(title), 'A') || 
+example_search(#            setweight(to_tsvector(description), 'C')
+example_search(#          ),
+example_search(#          plainto_tsquery('biology')) AS rank
+example_search(#     FROM example_course
+example_search(# )
+example_search-# SELECT id, course_code, title, rank
+example_search-#   FROM courses
+example_search-#  WHERE rank >= 0.1
+example_search-#  ORDER BY rank DESC, course_code ASC;
+ id  | course_code |             title             |   rank   
+-----+-------------+-------------------------------+----------
+   1 | BIOL112     | General Biology I             | 0.638323
+ 448 | BIOL498     | Cancer Biology                | 0.638323
+   2 | BIOL113     | General Biology II            | 0.607927
+ 459 | BIOL221     | Animal Biology                | 0.607927
+ 458 | BIOL222     | Plant Biology                 | 0.607927
+ 457 | BIOL223     | Animal Biology Lab            | 0.607927
+ 456 | BIOL224     | Plant Biology Lab             | 0.607927
+ 453 | BIOL312     | Cell Biology                  | 0.607927
+ 455 | BIOL293     | Anatomy and Physiology I Lab  | 0.121585
+ 454 | BIOL294     | Anatomy and Physiology II Lab | 0.121585
+ 323 | ENVR233     | Soil Science                  | 0.121585
+  77 | PSYC232     | Developmental Psychology      | 0.121585
+  61 | PSYC646     | Lifespan Development          | 0.121585
+(13 rows)
+```
 
 ## Optimization
 
@@ -215,17 +446,153 @@ class ExampleConfig(AppConfig):
         import example.signals
 ```
 
-## Ranking
-
-(Ranking here.)
-
 ## Fuzzy Search
 
 (Fuzzy search here.)
 
+**example/views.py**
+
+```python
+from rest_framework.generics import ListAPIView
+from django.contrib.postgres.search import TrigramSimilarity
+from .models import Course
+from .serializers import CourseSearchSerializer
+
+
+class CourseSearchView(ListAPIView):
+    serializer_class = CourseSearchSerializer
+
+    def get_queryset(self):
+        query = self.request.query_params.get('query')
+        if query is None:
+            return Course.objects.none()
+        return Course.objects.annotate(
+            similarity=TrigramSimilarity('title', query)
+        ).filter(rank__gte=0.3).order_by('-similarity')
+```
+
+```sql
+SELECT id, course_code, title, similarity(title, 'bilogy') AS similarity
+  FROM example_course
+ WHERE similarity(title, 'bilogy') >= 0.3
+ ORDER BY similarity DESC;
+```
+
+```
+example_search=# SELECT id, course_code, title, similarity(title, 'bilogy') AS similarity
+example_search-#   FROM example_course
+example_search-#  WHERE similarity(title, 'bilogy') >= 0.3
+example_search-#  ORDER BY similarity DESC;
+ id  | course_code |     title     | similarity 
+-----+-------------+---------------+------------
+ 453 | BIOL312     | Cell Biology  |   0.333333
+ 458 | BIOL222     | Plant Biology |     0.3125
+(2 rows)
+```
+
 ## Putting It All Together
 
 (Putting it all together here.)
+
+**example/views.py**
+
+```python
+from rest_framework.generics import ListAPIView
+from django.contrib.postgres.search import SearchQuery, SearchRank, TrigramSimilarity
+from django.db.models import IntegerField, Q
+from django.db.models.expressions import Case, F, Value, When
+from .models import Course
+from .serializers import CourseSearchSerializer
+
+
+class CourseSearchView(ListAPIView):
+    serializer_class = CourseSearchSerializer
+
+    def get_queryset(self):
+        query = self.request.query_params.get('query')
+        if query is None:
+            return Course.objects.none()
+        return Course.objects.annotate(
+            exact_rank=Case(
+                When(course_code__iexact=query, then=Value(1)),
+                When(title__iexact=query, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField()
+            ),
+            full_text_rank=SearchRank(F('search_vector'), SearchQuery(query)),
+            fuzzy_rank=TrigramSimilarity('course_code', query)
+        ).filter(
+            Q(exact_rank=1) |
+            Q(full_text_rank__gte=0.1) |
+            Q(fuzzy_rank__gte=0.3)
+        ).order_by(
+            '-exact_rank',
+            '-full_text_rank',
+            '-fuzzy_rank',
+            'course_code'
+        )
+```
+
+```sql
+WITH courses AS (
+  SELECT id, course_code, title, description, search_vector, 
+         CASE  
+           WHEN UPPER(course_code) = UPPER('biology') THEN 1 
+           WHEN UPPER(title) = UPPER('biology') THEN 1 
+           ELSE 0 
+         END AS exact_rank, 
+         ts_rank(search_vector, plainto_tsquery('biology')) AS full_text_rank, 
+         similarity(course_code, 'biology') AS fuzzy_rank
+    FROM example_course
+)
+SELECT id, course_code, title, exact_rank, full_text_rank, fuzzy_rank
+  FROM courses
+ WHERE exact_rank = 1
+    OR full_text_rank >= 0.1
+    OR fuzzy_rank >= 0.3
+ ORDER BY exact_rank DESC, full_text_rank DESC, fuzzy_rank DESC, course_code ASC;
+```
+
+```
+example_search=# WITH courses AS (
+example_search(#   SELECT id, course_code, title, description, search_vector, 
+example_search(#          CASE  
+example_search(#            WHEN UPPER(course_code) = UPPER('biology') THEN 1 
+example_search(#            WHEN UPPER(title) = UPPER('biology') THEN 1 
+example_search(#            ELSE 0 
+example_search(#          END AS exact_rank, 
+example_search(#          ts_rank(search_vector, plainto_tsquery('biology')) AS full_text_rank, 
+example_search(#          similarity(course_code, 'biology') AS fuzzy_rank
+example_search(#     FROM example_course
+example_search(# )
+example_search-# SELECT id, course_code, title, exact_rank, full_text_rank, fuzzy_rank
+example_search-#   FROM courses
+example_search-#  WHERE exact_rank = 1
+example_search-#     OR full_text_rank >= 0.1
+example_search-#     OR fuzzy_rank >= 0.3
+example_search-#  ORDER BY exact_rank DESC, full_text_rank DESC, fuzzy_rank DESC, course_code ASC;
+ id  | course_code |             title             | exact_rank | full_text_rank | fuzzy_rank 
+-----+-------------+-------------------------------+------------+----------------+------------
+   1 | BIOL112     | General Biology I             |          0 |       0.638323 |   0.333333
+ 448 | BIOL498     | Cancer Biology                |          0 |       0.638323 |   0.333333
+   2 | BIOL113     | General Biology II            |          0 |       0.607927 |   0.333333
+ 459 | BIOL221     | Animal Biology                |          0 |       0.607927 |   0.333333
+ 458 | BIOL222     | Plant Biology                 |          0 |       0.607927 |   0.333333
+ 457 | BIOL223     | Animal Biology Lab            |          0 |       0.607927 |   0.333333
+ 456 | BIOL224     | Plant Biology Lab             |          0 |       0.607927 |   0.333333
+ 453 | BIOL312     | Cell Biology                  |          0 |       0.607927 |   0.333333
+ 455 | BIOL293     | Anatomy and Physiology I Lab  |          0 |       0.121585 |   0.333333
+ 454 | BIOL294     | Anatomy and Physiology II Lab |          0 |       0.121585 |   0.333333
+ 323 | ENVR233     | Soil Science                  |          0 |       0.121585 |          0
+  77 | PSYC232     | Developmental Psychology      |          0 |       0.121585 |          0
+  61 | PSYC646     | Lifespan Development          |          0 |       0.121585 |          0
+ 452 | BIOL345     | Range and Wildland Plants     |          0 |              0 |   0.333333
+ 451 | BIOL472     | Biochemistry I: Foundations   |          0 |              0 |   0.333333
+ 450 | BIOL492     | Physiology                    |          0 |              0 |   0.333333
+ 449 | BIOL493     | Human Anatomy Laboratory      |          0 |              0 |   0.333333
+(17 rows)
+
+```
 
 # Full Text Search with Django, PostgreSQL, and Angular (Part II)
 
@@ -281,6 +648,29 @@ export class AppComponent {
 ## Course Search
 
 (Course search here.)
+
+**example/serializers.py**
+
+```python
+class CourseSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Course
+        fields = ('id', 'course_code', 'title', 'description',)
+```
+
+**example/views.py**
+
+```python
+class CourseView(RetrieveAPIView):
+    queryset = Course.objects.all()
+    serializer_class = CourseSerializer
+```
+
+**example_search/urls.py**
+
+```python
+path('api/course/<int:pk>/', CourseView.as_view()),
+```
 
 **src/app/course.ts**
 

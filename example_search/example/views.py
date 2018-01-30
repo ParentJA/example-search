@@ -1,5 +1,6 @@
 from django.contrib.postgres.search import SearchQuery, SearchRank, TrigramSimilarity
-from django.db.models import Case, F, IntegerField, Q, Value, When
+from django.db.models import IntegerField, Q
+from django.db.models.expressions import Case, F, Value, When
 from rest_framework.generics import ListAPIView, RetrieveAPIView
 from .models import Course
 from .serializers import CourseSearchSerializer, CourseSerializer
@@ -28,7 +29,7 @@ class CourseSearchView(ListAPIView):
             fuzzy_rank=TrigramSimilarity('course_code', query)
         ).filter(
             Q(exact_rank=1) |
-            Q(full_text_rank__gte=0.3) |
+            Q(full_text_rank__gte=0.1) |
             Q(fuzzy_rank__gte=0.3)
         ).order_by(
             '-exact_rank',
