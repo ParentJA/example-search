@@ -2,6 +2,18 @@
 
 (Intro here.)
 
+Give users a list and they’re going to want to search it.
+
+Implementing search in a web application isn't a new challenge, but as of Django 1.10 it's an easy one to overcome. Thanks to the `django.contrib.postgres.search` package, PostgreSQL search functions are abstracted into Python, which means you don't have to be a database guru to get started. 
+
+(FIXME) In this tutorial, we'll demonstrate how to configure an app to use basic, full text, and fuzzy search.
+
+Our application uses:
+- Python (3.6.4)
+- Django (2.0.1)
+- Django REST Framework (3.7.7)
+- PostgreSQL (9.6.3)
+
 ## Objectives
 
 (Objectives here.)
@@ -10,21 +22,32 @@
 
 (Project setup here.)
 
+Create a new Python virtual environment and install our dependencies with `pip`. We are using virtualenvwrapper.
+
 ```
 computer$ mkvirtualenv example-search
 (example-search) computer$ pip install django djangorestframework psycopg2
+```
+
+Create a new Django project and a Django app.
+
+```
 (example-search) computer$ django-admin startproject example_search
 (example-search) computer$ cd example_search
 (example-search) computer$ python manage.py startapp example
+```
+
+Create a new PostgreSQL user and database.
+
+```
 (example-search) computer$ createuser -d -e -W example_search
 Password: password
 CREATE ROLE example_search NOSUPERUSER CREATEDB NOCREATEROLE INHERIT LOGIN;
 (example-search) computer$ createdb -e -O "example_search" example_search
 CREATE DATABASE example_search OWNER example_search;
-(example-search) computer$ export DB_NAME=example_search
-(example-search) computer$ export DB_USER=example_search
-(example-search) computer$ export DB_PASS=password
 ```
+
+Open the Django settings file and replace the `DATABASES` attribute with the following code.
 
 **example_search/settings.py**
 
@@ -41,7 +64,35 @@ DATABASES = {
 }
 ```
 
-Add `rest_framework` and `example` to `INSTALLED_APPS`.
+Note that we will pull our database configuration from environment variables. Create those environment variables in your terminal. If you are following along closely, the variables will match ours.
+
+```
+(example-search) computer$ export DB_NAME=example_search
+(example-search) computer$ export DB_USER=example_search
+(example-search) computer$ export DB_PASS=password
+```
+
+Back in the Django settings file, add `rest_framework` and `example` to `INSTALLED_APPS`. You app is ready to connect to the database.
+
+Run the `migrate` command in your terminal to install the initial database tables.
+
+```
+(example-search) computer$ python manage.py migrate
+(FIXME) Show sample output here.
+```
+
+Connect to the database and check that tables exist.
+
+```
+(example-search) computer$ psql -U example_search
+example_search=# \dt
+(FIXME) Show sample output here.
+example_search=# \q
+```
+
+## App Foundation
+
+Create a `Course` model. (FIXME: Why are we using courses?)
 
 **example/models.py**
 
@@ -58,6 +109,8 @@ class Course(models.Model):
         return f'{self.course_code} {self.title}'
 ```
 
+Create a database migration and migrate the database. If you're using the app, load the fixture data too.
+
 ```
 (example-search) computer$ python manage.py makemigrations
 Migrations for 'example':
@@ -66,23 +119,16 @@ Migrations for 'example':
 (example-search) computer$ python manage.py migrate
 (example-search) computer$ python loaddata ./example/fixtures/courses.json
 (example-search) computer$ psql -U example_search
-example_search=# SELECT count(*)
-example_search-#   FROM example_course;
+example_search=# SELECT count(*) FROM example_course;
  count 
 -------
    522
 (1 row)
 
-example_search=# CREATE EXTENSION pg_trgm;
-example_search=# SELECT show_trgm('hello');
-            show_trgm            
----------------------------------
- {"  h"," he",ell,hel,llo,"lo "}
-(1 row)
-
 example_search=# \q
-(example-search) computer$ python manage.py createsuperuser
 ```
+
+Create an admin page for the model.
 
 **example/admin.py**
 
@@ -98,6 +144,23 @@ class CourseAdmin(admin.ModelAdmin):
     readonly_fields = ('id',)
 ```
 
+Create a superuser.
+
+```
+(example-search) computer$ python manage.py createsuperuser
+(FIXME: Show sample output.)
+```
+
+Run the app and take a look at the course data.
+
+```
+(example-search) computer$ python manage.py runserver 0.0.0.0:8000
+```
+
+Visit [http://localhost:8000/admin](http://localhost:8000/admin). Kill the app and continue.
+
+Create the API. Make a serializer.
+
 **example/serializers.py**
 
 ```python
@@ -110,6 +173,8 @@ class CourseSearchSerializer(serializers.ModelSerializer):
         model = Course
         fields = ('id', 'course_code', 'title',)
 ```
+
+Create a view. For now, make the API return all courses or none.
 
 **example/views.py**
 
@@ -129,6 +194,8 @@ class CourseSearchView(ListAPIView):
         return Course.objects.all()
 ```
 
+Connect the view to a URL path.
+
 **example_search/urls.py**
 
 ```python
@@ -146,6 +213,12 @@ urlpatterns = [
 ## Basic Search
 
 (Basic search here.)
+
+A basic search matches your query to the value of a field. The database compares the characters at each position and they must be exactly the same. If you search for “biology” then your query will match “biology” but not “BIOLOGY” or “animal biology”.
+
+In many cases, finding a perfect match is imperative. When you need to retrieve a record identified by a username or a natural key, finding a close match isn’t good enough. Who snagged the last available seat—_student25_ or _student26_? You better get it right or the consequences can be disastrous.
+
+Modify the view to fetch courses whose fields match the query.
 
 **example/views.py**
 
@@ -170,6 +243,8 @@ class CourseSearchView(ListAPIView):
         )
 ```
 
+The Django `QuerySet` makes the equivalent SQL query.
+
 ```sql
 SELECT id, course_code, title
   FROM example_course
@@ -177,6 +252,8 @@ SELECT id, course_code, title
     OR title = 'Animal Biology' 
     OR description = 'Animal Biology';
 ```
+
+Here's how it looks when run in `psql`.
 
 ```
 example_search=# SELECT id, course_code, title
@@ -194,7 +271,13 @@ example_search-#     OR description = 'Animal Biology';
 
 (Full text search here.)
 
+When the stakes are low, full text search gives users the ability to find data that sort of matches. Many times, when users search “biology”, they want to see “BIOLOGY” and “animal biology” too. They also want to see “biological”. The results should be related to the query instead of an exact match.
+
+Full text search works by breaking down the query and the target into tokens. A token is a word and most engines eliminate stop words like “a” and “the” because they are so common. PostgreSQL maps these tokens to positions in the document and searches this dictionary for matching tokens. “Biology” and “biological” share the same root and are considered a match.
+
 A basic search works fine when your query matches a field's value exactly, but what about when your query matches part of the value? You might point to the `contains` lookup expression. But wouldn't it be nice if when you searched for "biology", your query matched "biological" too?
+
+Modify the view to perform full text search on all of the fields.
 
 **example/views.py**
 
@@ -222,6 +305,8 @@ class CourseSearchView(ListAPIView):
         ).filter(search_vector=SearchQuery(query))
 ```
 
+The following SQL will return equivalent results.
+
 ```sql
 WITH courses AS (
   SELECT id, course_code, title, description, 
@@ -236,6 +321,10 @@ SELECT id, course_code, title
   FROM courses
  WHERE search_vector @@ plainto_tsquery('biology');
 ```
+
+(What do each of the functions do?)
+
+Here's how the query runs in `psql`.
 
 ```
 example_search=# WITH courses AS (
@@ -268,9 +357,15 @@ example_search-#  WHERE search_vector @@ plainto_tsquery('biology');
 (13 rows)
 ```
 
+(Talk about results. Why do Lifespan Development, Developmental Pyschology, and Soil Science appear before Cancer Biology?)
+
 ## Ranking
 
 (Ranking here.)
+
+Look at the previous example. We searched for "biology" but we see "Soil Science" above "Cancer Biology". This is a ranking issue. We got the correct results but they're not in the correct order.
+
+Modify the view code to use ranking. 
 
 **example/views.py**
 
@@ -299,6 +394,10 @@ class CourseSearchView(ListAPIView):
         ).filter(rank__gte=0.1).order_by('-rank', 'course_code')
 ```
 
+(What do the weights do? What is the significance of the value?)
+
+Equivalent SQL.
+
 ```sql
 WITH courses AS (
   SELECT id, course_code, title, description, ts_rank(
@@ -315,6 +414,8 @@ SELECT id, course_code, title, rank
  WHERE rank >= 0.1
  ORDER BY rank DESC, course_code ASC;
 ```
+
+Run in `psql`. (Talk about results vis-a-vis ranking.)
 
 ```
 example_search=# WITH courses AS (
@@ -353,6 +454,10 @@ example_search-#  ORDER BY rank DESC, course_code ASC;
 
 (Optimization here.)
 
+We've been calculating the `vector` in each query. We can optimize this query by precalculating the vector and storing it in the `example_course` database as a field.
+
+Modify the `Course` model to use the `SearchVectorField`. (Talk about pre-processing the search vector and how it improves performance.)
+
 **example/models.py**
 
 ```python
@@ -370,9 +475,13 @@ class Course(models.Model):
         return f'{self.course_code} {self.title}'
 ```
 
+Make migrations.
+
 ```
 python manage.py makemigrations
 ```
+
+Add a data migration operation to update all of the course data.
 
 **example/migrations/0002_course_search_vector.py**
 
@@ -405,9 +514,13 @@ class Migration(migrations.Migration):
     ]
 ```
 
+Run the migration.
+
 ```
 python manage.py migrate
 ```
+
+Add a signal to update the search vector everytime a course changes.
 
 **example/signals.py**
 
@@ -426,6 +539,8 @@ def update_search_vector(sender, instance, *args, **kwargs):
         SearchVector('description', weight='C')
     ))
 ```
+
+Modify the following files to finish setting up the signal.
 
 **example/__init__.py**
 
@@ -446,9 +561,30 @@ class ExampleConfig(AppConfig):
         import example.signals
 ```
 
+Add `search_vector` to the `fields` and `readonly_fields` of the `CourseAdmin`. Making this change will let you see the vector in the admin page.
+
 ## Fuzzy Search
 
 (Fuzzy search here.)
+
+Full text search works well when your search term is spelled correctly. We still want to find results when a user mistypes a word. (How do trigrams work?)
+
+Add the `pg_trgm` extension to the database.
+
+```
+(example-search) computer$ psql -U example_search
+example_search=# CREATE EXTENSION pg_trgm;
+CREATE EXTENSION
+example_search=# SELECT show_trgm('hello');
+            show_trgm            
+---------------------------------
+ {"  h"," he",ell,hel,llo,"lo "}
+(1 row)
+
+example_search=# \q
+```
+
+Modify the view to use fuzzy search.
 
 **example/views.py**
 
@@ -471,12 +607,16 @@ class CourseSearchView(ListAPIView):
         ).filter(rank__gte=0.3).order_by('-similarity')
 ```
 
+Here is the SQL equivalent.
+
 ```sql
 SELECT id, course_code, title, similarity(title, 'bilogy') AS similarity
   FROM example_course
  WHERE similarity(title, 'bilogy') >= 0.3
  ORDER BY similarity DESC;
 ```
+
+An example in `psql`.
 
 ```
 example_search=# SELECT id, course_code, title, similarity(title, 'bilogy') AS similarity
@@ -493,6 +633,8 @@ example_search-#  ORDER BY similarity DESC;
 ## Putting It All Together
 
 (Putting it all together here.)
+
+Modify the view to include a lot of code. (Why are we making these choices? Are we using what we learned? Talk about rank.)
 
 **example/views.py**
 
@@ -533,6 +675,8 @@ class CourseSearchView(ListAPIView):
         )
 ```
 
+SQL equivalent.
+
 ```sql
 WITH courses AS (
   SELECT id, course_code, title, description, search_vector, 
@@ -552,6 +696,8 @@ SELECT id, course_code, title, exact_rank, full_text_rank, fuzzy_rank
     OR fuzzy_rank >= 0.3
  ORDER BY exact_rank DESC, full_text_rank DESC, fuzzy_rank DESC, course_code ASC;
 ```
+
+Final example in `psql`.
 
 ```
 example_search=# WITH courses AS (
@@ -611,6 +757,8 @@ ng new example-search
 npm install bootstrap bootswatch jquery popper.js
 ```
 
+Add scripts and styles.
+
 **.angular-cli.json**
 
 ```json
@@ -624,6 +772,8 @@ npm install bootstrap bootswatch jquery popper.js
   "../node_modules/bootstrap/dist/js/bootstrap.min.js"
 ]
 ```
+
+Modify the base component.
 
 **src/app/app.component.ts**
 
@@ -639,6 +789,8 @@ export class AppComponent {
 }
 ```
 
+Replace the contents with `<router-outlet>` to set up routing.
+
 **src/app/app.component.htmlts**
 
 ```html
@@ -649,28 +801,7 @@ export class AppComponent {
 
 (Course search here.)
 
-**example/serializers.py**
-
-```python
-class CourseSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Course
-        fields = ('id', 'course_code', 'title', 'description',)
-```
-
-**example/views.py**
-
-```python
-class CourseView(RetrieveAPIView):
-    queryset = Course.objects.all()
-    serializer_class = CourseSerializer
-```
-
-**example_search/urls.py**
-
-```python
-path('api/course/<int:pk>/', CourseView.as_view()),
-```
+Create a `Course` model for the client.
 
 **src/app/course.ts**
 
@@ -685,6 +816,8 @@ export class Course {
 }
 ```
 
+Create a course search service.
+
 **src/app/course-search.service**
 
 ```javascript
@@ -697,12 +830,14 @@ import { Course } from './course';
 export class CourseSearchService {
   constructor(private httpClient: HttpClient) {}
   search(query: string): Observable<Course[]> {
-    let url: string = 'http://localhost:8005/api/course/search/';
+    let url: string = '/api/course/search/';
     const params: HttpParams = new HttpParams().set('query', query);
     return this.httpClient.get<Course[]>(url, {params});
   }
 }
 ```
+
+And a component.
 
 **src/app/course-search/course-search.component.ts**
 
@@ -725,6 +860,8 @@ export class CourseSearchComponent {
   }
 }
 ```
+
+The template should have a search field and button. Searching returns a list of courses.
 
 **src/app/course-search/course-search.component.html**
 
@@ -751,6 +888,8 @@ export class CourseSearchComponent {
   </div>
 </div>
 ```
+
+Modify the app module file to support all of the changes.
 
 **src/app/app.module.ts**
 
@@ -792,14 +931,49 @@ export class AppModule {}
 
 (Course detail here.)
 
+Course search doesn't return descriptions. Need new API to return full course detail.
+
+Create a serializer.
+
+**example/serializers.py**
+
+```python
+class CourseSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Course
+        fields = ('id', 'course_code', 'title', 'description',)
+```
+
+Create a view.
+
+**example/views.py**
+
+```python
+class CourseView(RetrieveAPIView):
+    queryset = Course.objects.all()
+    serializer_class = CourseSerializer
+```
+
+Connect the view to a URL path.
+
+**example_search/urls.py**
+
+```python
+path('api/course/<int:pk>/', CourseView.as_view()),
+```
+
+Add course detail function to the course search service.
+
 **src/app/course-search.service**
 
 ```javascript
 getCourse(id: number): Observable<Course> {
-  let url: string = `http://localhost:8005/api/course/${id}/`;
+  let url: string = `/api/course/${id}/`;
   return this.httpClient.get<Course>(url);
 }
 ```
+
+Create a component.
 
 **src/app/course/course.component.ts**
 
@@ -820,6 +994,8 @@ export class CourseComponent implements OnInit {
   }
 }
 ```
+
+And a simple template.
 
 **src/app/course/course.component.html**
 
@@ -844,6 +1020,8 @@ export class CourseComponent implements OnInit {
 </div>
 ```
 
+Create a resolver to load the course detail when the course tile is clicked.
+
 **src/app/course.resolver.ts**
 
 ```javascript
@@ -861,6 +1039,8 @@ export class CourseResolver implements Resolve<Course> {
   }
 }
 ```
+
+Update app module once more.
 
 **src/app/app.module.ts**
 
@@ -903,6 +1083,8 @@ import { CourseResolver } from './course.resolver';
 export class AppModule {}
 ```
 
+Final step to activate routing.
+
 **src/app/course-search/course-search.component.html**
 
 ```html
@@ -912,6 +1094,36 @@ export class AppModule {}
 ## Bridging the Gap
 
 (Bridging the gap here.)
+
+Make some final changes to the settings to use the Angular code.
+
+**example_search/settings.py**
+
+```python
+TEMPLATES = [
+    {
+        'BACKEND': 'django.template.backends.django.DjangoTemplates',
+        'DIRS': [
+            os.path.join(BASE_DIR, 'www/example-search/dist')
+        ],
+        'APP_DIRS': True,
+        'OPTIONS': {
+            'context_processors': [
+                'django.template.context_processors.debug',
+                'django.template.context_processors.request',
+                'django.contrib.auth.context_processors.auth',
+                'django.contrib.messages.context_processors.messages',
+            ],
+        },
+    },
+]
+
+STATICFILES_DIRS = [
+    os.path.join(BASE_DIR, 'www/example-search/dist')
+]
+```
+
+Run this code to build the client for Django to use.
 
 ```
 ng build -d /static
