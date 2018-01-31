@@ -1067,7 +1067,7 @@ import { CourseResolver } from './course.resolver';
     HttpClientModule,
     BrowserModule,
     RouterModule.forRoot([
-      { path: ':id', component: CourseComponent, resolve: { course: CourseResolver } },
+      { path: 'course/:id', component: CourseComponent, resolve: { course: CourseResolver } },
       { path: '', component: CourseSearchComponent }
     ]),
     FormsModule
@@ -1088,7 +1088,7 @@ Final step to activate routing.
 **src/app/course-search/course-search.component.html**
 
 ```html
-<li class="list-group-item" *ngFor="let course of courses" [routerLink]="['.', course.id]">
+<li class="list-group-item" *ngFor="let course of courses" [routerLink]="['/course', course.id]">
 ```
 
 ## Bridging the Gap
