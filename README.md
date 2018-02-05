@@ -295,6 +295,7 @@ class CourseSearchView(ListAPIView):
     serializer_class = CourseSearchSerializer
 
     def get_queryset(self):
+        # Users pass search data as query string parameters.
         query = self.request.query_params.get('query')
         if query is None:
             return Course.objects.none()
@@ -555,11 +556,9 @@ Run in `psql`. (Talk about results vis-a-vis ranking.)
 
 ## Optimization
 
-(Optimization here.)
+We've been calculating a `tsvector` for each course in every query. That's an expensive operation. One way to optimize the performance of our search is to precalculate the `tsvector` and to store it as a field in the `example_course` database table. If we use that technique, then PostgreSQL doesn't have to run `to_tsquery()` on each database record. It only has to compare the search query to the precalculated value in each row. Django provides a special `SearchVectorField` class for this exact purpose.
 
-We've been calculating the `vector` in each query. We can optimize this query by precalculating the vector and storing it in the `example_course` database as a field.
-
-Modify the `Course` model to use the `SearchVectorField`. (Talk about pre-processing the search vector and how it improves performance.)
+Modify the `Course` model to use the `SearchVectorField`. 
 
 **example/models.py**
 
@@ -578,7 +577,7 @@ class Course(models.Model):
         return f'{self.course_code} {self.title}'
 ```
 
-Make migrations.
+Make a migration, but don't run it yet.
 
 ```
 (example-search) computer$ python manage.py makemigrations
@@ -587,7 +586,7 @@ Migrations for 'example':
     - Add field search_vector to course
 ```
 
-Add a data migration operation to update all of the course data.
+Add a data migration operation to update the search vector on each of the course data. When this migration is run, all existing records in the database will have their search vectors calculated.
 
 **example/migrations/0002_course_search_vector.py**
 
@@ -620,7 +619,7 @@ class Migration(migrations.Migration):
     ]
 ```
 
-Run the migration.
+Run the migration to add the `search_vector` field and update its value.
 
 ```
 (example-search) computer$ python manage.py migrate
@@ -630,7 +629,9 @@ Running migrations:
   Applying example.0002_course_search_vector... OK
 ```
 
-Add a signal to update the search vector everytime a course changes.
+The migration handles existing courses, but how do we precalculate the search vector for courses that get added to the catalog later? Every time a course record is saved, we should re-calculate the vector and update the `search_vector` field. 
+
+Create a `signals.py` file and register a `receiver` to listen for every time a course record is saved.
 
 **example/signals.py**
 
@@ -671,7 +672,7 @@ class ExampleConfig(AppConfig):
         import example.signals
 ```
 
-Add `search_vector` to the `fields` and `readonly_fields` of the `CourseAdmin`. Making this change will let you see the vector in the admin page.
+Add `search_vector` to the `fields` and `readonly_fields` of the `CourseAdmin`. Making this change will let admin users see the vector for each course in the admin page, but it won't let them edit it.
 
 ## Fuzzy Search
 
