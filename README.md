@@ -568,6 +568,7 @@ from django.db import models
 
 
 class Course(models.Model):
+    """A course offered at a university."""
     course_code = models.CharField(max_length=16, unique=True)
     title = models.CharField(max_length=250)
     description = models.TextField()
@@ -683,8 +684,6 @@ Full text search works well when your search term is spelled correctly. We still
 Add the `pg_trgm` extension to the database.
 
 ```
-(example-search) computer$ psql -U example_search
-example_search=# \c example_search
 example_search=# CREATE EXTENSION pg_trgm;
 CREATE EXTENSION
 example_search=# SELECT show_trgm('hello');
@@ -692,8 +691,6 @@ example_search=# SELECT show_trgm('hello');
 ---------------------------------
  {"  h"," he",ell,hel,llo,"lo "}
 (1 row)
-
-example_search=# \q
 ```
 
 Modify the view to use fuzzy search.
